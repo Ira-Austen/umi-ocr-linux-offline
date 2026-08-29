@@ -3,8 +3,6 @@ name: Build & Test Umi-OCR Linux Offline Package
 on:
   workflow_dispatch:
   push:
-    branches:
-      - main
     tags:
       - 'v*'
 
@@ -191,9 +189,8 @@ jobs:
 
           CONTENT="[Desktop Entry]
           Type=Application
-          Name=Umi-OCR 文字识别
-          Name[zh_CN]=Umi-OCR 文字识别
-          Comment=离线批量OCR文字识别工具 (PP-OCRv6)
+          Name=Umi-OCR
+          Comment=Umi-OCR
           Exec=\"${APP_DIR}/umi-ocr.sh\"
           Path=${APP_DIR}
           Icon=${APP_DIR}/UmiOCR-data/icon/icon-256.png

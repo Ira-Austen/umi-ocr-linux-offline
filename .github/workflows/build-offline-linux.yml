@@ -1,0 +1,221 @@
+name: Build & Test Umi-OCR Linux Offline Package
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1-mesa-glx libglib2.0-0 xvfb wget tar xz-utils curl jq
+
+      - name: "1. Download Umi-OCR release & clone plugin"
+        run: |
+          mkdir -p build && cd build
+          # 下载 Umi-OCR 官方 Linux 发行包 (自带主程序嵌入式运行环境)
+          wget -q https://github.com/hiroi-sora/Umi-OCR/releases/download/v2.1.5/Umi-OCR_Linux_Paddle_2.1.5.tar.xz
+          tar -xf Umi-OCR_Linux_Paddle_2.1.5.tar.xz
+          mv Umi-OCR_Linux_Paddle_2.1.5 Umi-OCR
+          rm Umi-OCR_Linux_Paddle_2.1.5.tar.xz
+
+          # 克隆二开新引擎仓库
+          git clone --depth 1 https://github.com/chapterv/umi-paddle-neoengine.git
+
+          # 将插件植入 Umi-OCR 插件目录
+          cp -r umi-paddle-neoengine/win_x64_PaddleOCR_Py Umi-OCR/UmiOCR-data/plugins/
+
+          # 覆盖宿主增强补丁 (表格/多任务支持)
+          PATCH_DIR=umi-paddle-neoengine/patches/umi-host
+          if [ -d "$PATCH_DIR" ]; then
+              cp -f "$PATCH_DIR"/mission*.py Umi-OCR/UmiOCR-data/py_src/mission/ 2>/dev/null || true
+              cp -f "$PATCH_DIR"/Batch*.py Umi-OCR/UmiOCR-data/py_src/tag_pages/ 2>/dev/null || true
+              cp -f "$PATCH_DIR"/line_preprocessing.py Umi-OCR/UmiOCR-data/py_src/ocr/tbpu/parser_tools/ 2>/dev/null || true
+              cp -f "$PATCH_DIR"/output_*.py Umi-OCR/UmiOCR-data/py_src/ocr/output/ 2>/dev/null || true
+              cp -f "$PATCH_DIR"/parser_table_grid.py Umi-OCR/UmiOCR-data/py_src/ocr/tbpu/ 2>/dev/null || true
+              cp -f "$PATCH_DIR"/table_grid.py Umi-OCR/UmiOCR-data/py_src/ocr/tbpu/parser_tools/ 2>/dev/null || true
+              cp -f "$PATCH_DIR"/*.qml Umi-OCR/UmiOCR-data/qt_res/qml/Configs/ 2>/dev/null || true
+              cp -f "$PATCH_DIR"/ResultsTableView.qml Umi-OCR/UmiOCR-data/qt_res/qml/Widgets/ResultLayout/ 2>/dev/null || true
+          fi
+
+      - name: "2. Deploy portable standalone Python 3.11"
+        run: |
+          cd build/Umi-OCR/UmiOCR-data/plugins/win_x64_PaddleOCR_Py
+          
+          # 获取独立的 Python 3.11 便携环境
+          PY_URL=$(curl -sL https://api.github.com/repos/astral-sh/python-build-standalone/releases/latest | \
+            jq -r '.assets[] | select(.name | test("cpython-3.11.*-x86_64-unknown-linux-gnu-install_only.tar.gz")) | .browser_download_url' | head -n 1)
+          
+          echo "Downloading portable python: $PY_URL"
+          curl -sL "$PY_URL" -o python_portable.tar.gz
+          tar -xzf python_portable.tar.gz
+          mv python .venv_portable
+          rm python_portable.tar.gz
+
+          # 生成 Linux 启动脚本 run.sh
+          cat << 'EOF' > run.sh
+          #!/usr/bin/env bash
+          DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+          export PYTHONUTF8=1
+          export PYTHONIOENCODING=utf-8
+          export LD_LIBRARY_PATH="$DIR/.venv_portable/lib:$LD_LIBRARY_PATH"
+          exec "$DIR/.venv_portable/bin/python3" "$DIR/engine.py" "$@"
+          EOF
+          chmod +x run.sh
+
+      - name: "3. Install PaddleOCR & ONNX Runtime dependencies"
+        run: |
+          cd build/Umi-OCR/UmiOCR-data/plugins/win_x64_PaddleOCR_Py
+          ./.venv_portable/bin/python3 -m pip install --upgrade pip
+          ./.venv_portable/bin/python3 -m pip install paddlepaddle==3.2.1 paddleocr==3.7.0 onnxruntime==1.26.0 pymupdf opencv-python-headless pillow psutil openpyxl lxml scipy scikit-learn paddlex
+
+      - name: "4. Pre-download all offline models (PP-OCRv6 + Tools)"
+        run: |
+          cd build/Umi-OCR/UmiOCR-data/plugins/win_x64_PaddleOCR_Py
+          export PADDLE_PDX_CACHE_HOME="$(pwd)/paddlex"
+          mkdir -p "$PADDLE_PDX_CACHE_HOME"
+
+          ./.venv_portable/bin/python3 - << 'PY_EOF'
+          from model_sources import configure_domestic_model_sources
+          import paddleocr
+
+          configure_domestic_model_sources()
+          print(">>> 开始预下载并缓存 PP-OCRv6 离线模型...")
+          kw = dict(
+              device="cpu",
+              engine="onnxruntime",
+              engine_config={"providers": ["CPUExecutionProvider"]},
+              use_textline_orientation=True,
+              use_doc_orientation_classify=True,
+              use_doc_unwarping=True,
+              cpu_threads=4
+          )
+          # PP-OCRv6 medium + 工具模型
+          paddleocr.PaddleOCR(lang="ch", ocr_version="PP-OCRv6", **kw)
+          # PP-OCRv6 small
+          paddleocr.PaddleOCR(lang="ch", ocr_version="PP-OCRv6", text_detection_model_name="PP-OCRv6_small_det", text_recognition_model_name="PP-OCRv6_small_rec", **kw)
+          # PP-OCRv4 英文
+          paddleocr.PaddleOCR(lang="en", ocr_version="PP-OCRv4", **kw)
+          print(">>> 离线模型下载与缓存完成！")
+          PY_EOF
+
+      - name: "5. CI Test: verify offline engine pipeline & inference"
+        run: |
+          cd build/Umi-OCR/UmiOCR-data/plugins/win_x64_PaddleOCR_Py
+
+          ./.venv_portable/bin/python3 - << 'TEST_EOF'
+          import subprocess
+          import json
+          import cv2
+          import numpy as np
+          import sys
+          import time
+
+          # 1. 创建测试图片
+          img = np.full((120, 400, 3), 255, dtype=np.uint8)
+          cv2.putText(img, "TEST OK 123", (30, 70), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 0), 2)
+          cv2.imwrite("/tmp/test_ocr.png", img)
+
+          # 2. 启动引擎
+          p = subprocess.Popen(
+              ["./run.sh", "--engine=onnxruntime", "--ocr_version=PP-OCRv6", "--config_path=models/config_chinese.txt"],
+              stdin=subprocess.PIPE,
+              stdout=subprocess.PIPE,
+              stderr=subprocess.PIPE,
+              text=True,
+              bufsize=1
+          )
+
+          # 3. 检查初始化
+          init_line = p.stdout.readline().strip()
+          print("Engine init line:", init_line)
+          if "OCR init completed." not in init_line:
+              print("Init failed! Stderr:\n", p.stderr.read())
+              sys.exit(1)
+
+          # 4. 发送 OCR 识别请求
+          req = {"task": "ocr", "image_path": "/tmp/test_ocr.png"}
+          p.stdin.write(json.dumps(req) + "\n")
+          p.stdin.flush()
+
+          # 5. 检查返回结果
+          resp_line = p.stdout.readline().strip()
+          print("OCR response:", resp_line)
+          resp = json.loads(resp_line)
+          if resp.get("code") == 100:
+              print("✅ [Pass] CI 离线识别测试通过！")
+          else:
+              print(f"❌ [Fail] 识别返回异常码: {resp.get('code')}")
+              sys.exit(1)
+
+          p.terminate()
+          TEST_EOF
+
+      - name: "6. Add desktop shortcut generator & package"
+        run: |
+          # 写入统信 UOS / Linux 桌面图标一键生成脚本
+          cat << 'EOF' > build/Umi-OCR/create-desktop-shortcut.sh
+          #!/usr/bin/env bash
+          APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+          DESKTOP_DIR="${HOME}/Desktop"
+          [ -d "${HOME}/桌面" ] && DESKTOP_DIR="${HOME}/桌面"
+
+          DESKTOP_FILE="${DESKTOP_DIR}/Umi-OCR.desktop"
+          MENU_FILE="${HOME}/.local/share/applications/Umi-OCR.desktop"
+
+          chmod +x "${APP_DIR}/umi-ocr.sh"
+
+          CONTENT="[Desktop Entry]
+          Type=Application
+          Name=Umi-OCR 文字识别
+          Name[zh_CN]=Umi-OCR 文字识别
+          Comment=离线批量OCR文字识别工具 (PP-OCRv6)
+          Exec=\"${APP_DIR}/umi-ocr.sh\"
+          Path=${APP_DIR}
+          Icon=${APP_DIR}/UmiOCR-data/icon/icon-256.png
+          Terminal=false
+          Categories=Office;Utility;
+          "
+
+          echo "$CONTENT" > "$DESKTOP_FILE"
+          chmod +x "$DESKTOP_FILE"
+
+          mkdir -p "${HOME}/.local/share/applications"
+          echo "$CONTENT" > "$MENU_FILE"
+          chmod +x "$MENU_FILE"
+
+          echo "✅ 统信 UOS / Linux 桌面与应用菜单快捷方式创建成功！"
+          EOF
+          chmod +x build/Umi-OCR/create-desktop-shortcut.sh
+
+          cd build
+          # 清理 python 编译缓存减小包体积
+          find Umi-OCR -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+          tar -czvf Umi-OCR-Linux-Offline-PPOCRv6.tar.gz Umi-OCR/
+
+      - name: "7. Upload Artifact"
+        uses: actions/upload-artifact@v4
+        with:
+          name: Umi-OCR-Linux-Offline-PPOCRv6
+          path: build/Umi-OCR-Linux-Offline-PPOCRv6.tar.gz
+          retention-days: 7
+
+      - name: "8. Create GitHub Release on Tag"
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/Umi-OCR-Linux-Offline-PPOCRv6.tar.gz
+          generate_release_notes: true

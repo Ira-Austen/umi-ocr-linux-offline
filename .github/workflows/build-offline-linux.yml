@@ -103,12 +103,13 @@ jobs:
               use_doc_unwarping=True,
               cpu_threads=4
           )
-          # PP-OCRv6 medium + 工具模型
+          # 1. PP-OCRv6 medium (中英文通用，含工具模型)
           paddleocr.PaddleOCR(lang="ch", ocr_version="PP-OCRv6", **kw)
-          # PP-OCRv6 small
+          # 2. PP-OCRv6 small (轻量中英文模型)
           paddleocr.PaddleOCR(lang="ch", ocr_version="PP-OCRv6", text_detection_model_name="PP-OCRv6_small_det", text_recognition_model_name="PP-OCRv6_small_rec", **kw)
-          # PP-OCRv4 英文
-          paddleocr.PaddleOCR(lang="en", ocr_version="PP-OCRv4", **kw)
+          # 3. PP-OCRv5 多语言模型
+          paddleocr.PaddleOCR(lang="korean", ocr_version="PP-OCRv5", **kw)
+          paddleocr.PaddleOCR(lang="eslav", ocr_version="PP-OCRv5", **kw)
           print(">>> 离线模型下载与缓存完成！")
           PY_EOF
 

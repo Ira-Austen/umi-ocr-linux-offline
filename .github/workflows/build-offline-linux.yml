@@ -176,15 +176,7 @@ jobs:
           echo ">>> 验证 Umi-OCR 宿主 Python 3.10 环境及 Qt xcb 插件加载..."
           (
             source UmiOCR-data/.embeddable/activate.sh
-            xvfb-run -a env QT_DEBUG_PLUGINS=1 python3 -c "
-            import os, sys
-            from PySide2.QtCore import QCoreApplication
-            from PySide2.QtGui import QGuiApplication
-            print('Qt library paths:', QCoreApplication.libraryPaths())
-            print('QT_QPA_PLATFORM_PLUGIN_PATH:', os.environ.get('QT_QPA_PLATFORM_PLUGIN_PATH'))
-            app = QGuiApplication(sys.argv)
-            print('✅ [Pass] QGuiApplication xcb 插件初始化成功！')
-            "
+            xvfb-run -a env QT_DEBUG_PLUGINS=1 python3 -c "import os, sys; from PySide2.QtCore import QCoreApplication; from PySide2.QtGui import QGuiApplication; print('Qt library paths:', QCoreApplication.libraryPaths()); app = QGuiApplication(sys.argv); print('✅ [Pass] QGuiApplication xcb 插件初始化成功！')"
           )
 
           # 2. 验证新引擎子进程管道 (PaddleOCR PP-OCRv6 + ONNX)

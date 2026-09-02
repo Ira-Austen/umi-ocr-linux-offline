@@ -18,6 +18,7 @@ DEBIAN10_XCB_PKGS = [
     "http://archive.debian.org/debian/pool/main/x/xcb-util-image/libxcb-image0_0.4.0-1+b2_amd64.deb",
     "http://archive.debian.org/debian/pool/main/x/xcb-util-keysyms/libxcb-keysyms1_0.4.0-1+b2_amd64.deb",
     "http://archive.debian.org/debian/pool/main/x/xcb-util-renderutil/libxcb-render-util0_0.3.9-1+b1_amd64.deb",
+    "http://archive.debian.org/debian/pool/main/x/xcb-util/libxcb-util0_0.3.8-3+b2_amd64.deb",
     "http://archive.debian.org/debian/pool/main/x/xcb-util/libxcb-util1_0.4.0-1+b1_amd64.deb",
     "http://archive.debian.org/debian/pool/main/libx/libxcb/libxcb-xinerama0_1.13.1-2_amd64.deb",
     "http://archive.debian.org/debian/pool/main/libx/libxcb/libxcb-randr0_1.13.1-2_amd64.deb",
@@ -152,6 +153,21 @@ Qml2Imports = qml
                         bundled_count += 1
                     except Exception:
                         pass
+
+    # 确保 libxcb-util.so.0 与 libxcb-util.so.1 软链接相互完备
+    for tdir in target_dirs:
+        p0 = os.path.join(tdir, "libxcb-util.so.0")
+        p1 = os.path.join(tdir, "libxcb-util.so.1")
+        if os.path.exists(p1) and not os.path.exists(p0):
+            try:
+                os.symlink("libxcb-util.so.1", p0)
+            except Exception:
+                pass
+        if os.path.exists(p0) and not os.path.exists(p1):
+            try:
+                os.symlink("libxcb-util.so.0", p1)
+            except Exception:
+                pass
 
     # 清理临时解包目录
     shutil.rmtree(temp_extract, ignore_errors=True)

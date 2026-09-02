@@ -6,6 +6,8 @@
 
 import os
 import sys
+import glob
+import shutil
 
 def patch_all(umi_dir):
     umi_dir = os.path.abspath(umi_dir)
@@ -63,11 +65,15 @@ Qml2Imports = qml
         platforms_dir = os.path.join(qt_dir, "plugins", "platforms")
         plugins_dir = os.path.join(qt_dir, "plugins")
         lib_dir = os.path.join(qt_dir, "lib")
+        embed_lib = os.path.join(cwd, ".embeddable/lib")
         os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = platforms_dir
         os.environ["QT_PLUGIN_PATH"] = plugins_dir
         curr_ld = os.environ.get("LD_LIBRARY_PATH", "")
-        if lib_dir not in curr_ld:
-            os.environ["LD_LIBRARY_PATH"] = f"{lib_dir}:{curr_ld}" if curr_ld else lib_dir
+        extra_paths = [lib_dir, embed_lib]
+        for p in extra_paths:
+            if p not in curr_ld:
+                curr_ld = f"{p}:{curr_ld}" if curr_ld else p
+        os.environ["LD_LIBRARY_PATH"] = curr_ld
         try:
             from PySide2.QtCore import QCoreApplication
             QCoreApplication.addLibraryPath(plugins_dir)
@@ -75,13 +81,44 @@ Qml2Imports = qml
         except Exception:
             pass
 """
-        if "os.environ[\"QT_QPA_PLATFORM_PLUGIN_PATH\"]" not in code:
+        if 'os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"]' not in code:
             code = code.replace("os.chdir(cwd)", "os.chdir(cwd)" + inject_code)
             with open(main_py, "w", encoding="utf-8") as f:
                 f.write(code)
             print(" -> main_linux.py 已注入 Qt 动态定位代码")
 
-    # 4. 增强 umi-ocr.sh
+    # 4. 将系统 xcb / xkb 核心库打包进 .embeddable/lib 和 PySide2/Qt/lib 实现真正零依赖离线运行
+    pyside_qt_lib = os.path.join(embed_dir, "lib/python3.10/site-packages/PySide2/Qt/lib")
+    embed_lib = os.path.join(embed_dir, "lib")
+    os.makedirs(embed_lib, exist_ok=True)
+    if os.path.exists(pyside_qt_lib):
+        target_dirs = [embed_lib, pyside_qt_lib]
+    else:
+        target_dirs = [embed_lib]
+
+    lib_patterns = [
+        "/usr/lib/x86_64-linux-gnu/libxcb-*.so*",
+        "/usr/lib/x86_64-linux-gnu/libxkbcommon*.so*",
+    ]
+    bundled_count = 0
+    for pat in lib_patterns:
+        for f in glob.glob(pat):
+            fname = os.path.basename(f)
+            for tdir in target_dirs:
+                dest = os.path.join(tdir, fname)
+                if not os.path.exists(dest):
+                    try:
+                        if os.path.islink(f):
+                            linkto = os.readlink(f)
+                            os.symlink(linkto, dest)
+                        else:
+                            shutil.copy2(f, dest)
+                        bundled_count += 1
+                    except Exception:
+                        pass
+    print(f" -> 已自动打包 {bundled_count} 个 XCB/XKB 核心图形运行库进离线包")
+
+    # 5. 增强 umi-ocr.sh
     umi_sh = os.path.join(umi_dir, "umi-ocr.sh")
     umi_sh_content = """#!/bin/bash
 cd $(dirname ${BASH_SOURCE[0]})
@@ -107,23 +144,6 @@ if [ -d "$EMBED_DIR/lib/python3.10/site-packages/PySide2/Qt" ]; then
     export QT_QPA_PLATFORM_PLUGIN_PATH="$PYSIDE_QT/plugins/platforms"
     export QT_PLUGIN_PATH="$PYSIDE_QT/plugins"
     export LD_LIBRARY_PATH="$PYSIDE_QT/lib:$EMBED_DIR/lib:$LD_LIBRARY_PATH"
-fi
-
-# 检查系统 X11 支持库依赖
-MISSING_DEPS=""
-for lib in libxcb-xinerama.so.0 libxkbcommon-x11.so.0; do
-    if ! ldconfig -p 2>/dev/null | grep -q "$lib" && [ ! -f "/lib/x86_64-linux-gnu/$lib" ] && [ ! -f "/usr/lib/x86_64-linux-gnu/$lib" ]; then
-        MISSING_DEPS="$MISSING_DEPS $lib"
-    fi
-done
-
-if [ -n "$MISSING_DEPS" ]; then
-    echo "------------------------------------------------------------------"
-    echo "【重要提示】检测到当前系统可能未安装以下 X11 图形支持库:"
-    echo "   $MISSING_DEPS"
-    echo "如果界面无法显示，请在终端执行以下命令安装（仅需安装一次）:"
-    echo "   sudo apt update && sudo apt install -y libxcb-xinerama0 libxkbcommon-x11-0"
-    echo "------------------------------------------------------------------"
 fi
 
 echo "pwd: $(pwd)"

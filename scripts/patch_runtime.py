@@ -8,6 +8,29 @@ import os
 import sys
 import glob
 import shutil
+import urllib.request
+import subprocess
+
+# 严格使用与统信 UOS / Debian 10 (GLIBC 2.28) 匹配的底层 X11 图形库 (GLIBC <= 2.17)
+# 避免直接复制 Ubuntu 22.04 高版本 glibc (2.33+) 的 libxkbcommon/libxcb 导致 dlopen 失败
+DEBIAN10_XCB_PKGS = [
+    "http://archive.debian.org/debian/pool/main/x/xcb-util-wm/libxcb-icccm4_0.4.1-1.1_amd64.deb",
+    "http://archive.debian.org/debian/pool/main/x/xcb-util-image/libxcb-image0_0.4.0-1+b2_amd64.deb",
+    "http://archive.debian.org/debian/pool/main/x/xcb-util-keysyms/libxcb-keysyms1_0.4.0-1+b2_amd64.deb",
+    "http://archive.debian.org/debian/pool/main/x/xcb-util-renderutil/libxcb-render-util0_0.3.9-1+b1_amd64.deb",
+    "http://archive.debian.org/debian/pool/main/x/xcb-util/libxcb-util1_0.4.0-1+b1_amd64.deb",
+    "http://archive.debian.org/debian/pool/main/libx/libxcb/libxcb-xinerama0_1.13.1-2_amd64.deb",
+    "http://archive.debian.org/debian/pool/main/libx/libxcb/libxcb-randr0_1.13.1-2_amd64.deb",
+    "http://archive.debian.org/debian/pool/main/libx/libxcb/libxcb-render0_1.13.1-2_amd64.deb",
+    "http://archive.debian.org/debian/pool/main/libx/libxcb/libxcb-shape0_1.13.1-2_amd64.deb",
+    "http://archive.debian.org/debian/pool/main/libx/libxcb/libxcb-shm0_1.13.1-2_amd64.deb",
+    "http://archive.debian.org/debian/pool/main/libx/libxcb/libxcb-sync1_1.13.1-2_amd64.deb",
+    "http://archive.debian.org/debian/pool/main/libx/libxcb/libxcb-xfixes0_1.13.1-2_amd64.deb",
+    "http://archive.debian.org/debian/pool/main/libx/libxcb/libxcb-xkb1_1.13.1-2_amd64.deb",
+    "http://archive.debian.org/debian/pool/main/libx/libxcb/libxcb1_1.13.1-2_amd64.deb",
+    "http://archive.debian.org/debian/pool/main/libx/libxkbcommon/libxkbcommon-x11-0_0.8.2-1_amd64.deb",
+    "http://archive.debian.org/debian/pool/main/libx/libxkbcommon/libxkbcommon0_0.8.2-1_amd64.deb",
+]
 
 def patch_all(umi_dir):
     umi_dir = os.path.abspath(umi_dir)
@@ -87,36 +110,52 @@ Qml2Imports = qml
                 f.write(code)
             print(" -> main_linux.py 已注入 Qt 动态定位代码")
 
-    # 4. 将系统 xcb / xkb 核心库打包进 .embeddable/lib 和 PySide2/Qt/lib 实现真正零依赖离线运行
+    # 4. 下载并解压 Debian 10 Buster 核心 XCB / XKB 库 (GLIBC <= 2.17 兼容)
     pyside_qt_lib = os.path.join(embed_dir, "lib/python3.10/site-packages/PySide2/Qt/lib")
     embed_lib = os.path.join(embed_dir, "lib")
     os.makedirs(embed_lib, exist_ok=True)
+    target_dirs = [embed_lib]
     if os.path.exists(pyside_qt_lib):
-        target_dirs = [embed_lib, pyside_qt_lib]
-    else:
-        target_dirs = [embed_lib]
+        target_dirs.append(pyside_qt_lib)
 
-    lib_patterns = [
-        "/usr/lib/x86_64-linux-gnu/libxcb-*.so*",
-        "/usr/lib/x86_64-linux-gnu/libxkbcommon*.so*",
-    ]
+    temp_extract = os.path.join(umi_dir, ".tmp_deb_extract")
+    os.makedirs(temp_extract, exist_ok=True)
     bundled_count = 0
-    for pat in lib_patterns:
-        for f in glob.glob(pat):
-            fname = os.path.basename(f)
+
+    print(" -> 正在下载并注入 Debian 10 兼容版 X11/XCB 图形库 (GLIBC <= 2.17)...")
+    for deb_url in DEBIAN10_XCB_PKGS:
+        deb_name = deb_url.split("/")[-1]
+        deb_file = os.path.join(temp_extract, deb_name)
+        try:
+            req = urllib.request.Request(deb_url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req) as resp, open(deb_file, "wb") as out_f:
+                shutil.copyfileobj(resp, out_f)
+            # 使用 dpkg-deb 解包
+            subprocess.run(["dpkg-deb", "-x", deb_file, temp_extract], check=True)
+        except Exception as e:
+            print(f"    [WARN] 下载或解包 {deb_name} 失败: {e}")
+
+    # 将解压出来的 .so 库复制到目标库目录
+    src_lib_dir = os.path.join(temp_extract, "usr/lib/x86_64-linux-gnu")
+    if os.path.exists(src_lib_dir):
+        for entry in os.listdir(src_lib_dir):
+            src_path = os.path.join(src_lib_dir, entry)
             for tdir in target_dirs:
-                dest = os.path.join(tdir, fname)
-                if not os.path.exists(dest):
+                dst_path = os.path.join(tdir, entry)
+                if not os.path.exists(dst_path):
                     try:
-                        if os.path.islink(f):
-                            linkto = os.readlink(f)
-                            os.symlink(linkto, dest)
+                        if os.path.islink(src_path):
+                            linkto = os.readlink(src_path)
+                            os.symlink(linkto, dst_path)
                         else:
-                            shutil.copy2(f, dest)
+                            shutil.copy2(src_path, dst_path)
                         bundled_count += 1
                     except Exception:
                         pass
-    print(f" -> 已自动打包 {bundled_count} 个 XCB/XKB 核心图形运行库进离线包")
+
+    # 清理临时解包目录
+    shutil.rmtree(temp_extract, ignore_errors=True)
+    print(f" -> 已成功注入 {bundled_count} 个 Debian 10 原生兼容 XCB/XKB 核心图形运行库")
 
     # 5. 增强 umi-ocr.sh
     umi_sh = os.path.join(umi_dir, "umi-ocr.sh")

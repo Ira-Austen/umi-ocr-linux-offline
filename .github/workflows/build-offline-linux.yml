@@ -16,19 +16,25 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install system dependencies
+      - name: Install system build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgl1-mesa-glx libglib2.0-0 xvfb wget tar xz-utils curl jq
+          sudo apt-get install -y build-essential libgl1-mesa-glx libglib2.0-0 xvfb wget tar xz-utils curl jq
 
-      - name: "1. Download Umi-OCR release & clone plugin"
+      - name: "1. Download Umi-OCR release & remove old/incompatible binaries"
         run: |
           mkdir -p build && cd build
-          # 下载 Umi-OCR 官方 Linux 发行包 (自带主程序嵌入式运行环境)
+          # 下载 Umi-OCR 官方 Linux 发行包
           wget -q https://github.com/hiroi-sora/Umi-OCR/releases/download/v2.1.5/Umi-OCR_Linux_Paddle_2.1.5.tar.xz
           tar -xf Umi-OCR_Linux_Paddle_2.1.5.tar.xz
           mv Umi-OCR_Linux_Paddle_2.1.5 Umi-OCR
           rm Umi-OCR_Linux_Paddle_2.1.5.tar.xz
+
+          # 关键修复 1：彻底删除官方打包在 Debian 11 上、需要 GLIBC>=2.29/2.30 的 .embeddable
+          rm -rf Umi-OCR/UmiOCR-data/.embeddable
+
+          # 关键修复 2：删除老旧的 v3 C++ 引擎（避免与旧系统 glibc 冲突，同时缩减 ~300MB 体积）
+          rm -rf Umi-OCR/UmiOCR-data/plugins/linux_x64_PaddleOCR-json_v141
 
           # 克隆二开新引擎仓库
           git clone --depth 1 https://github.com/chapterv/umi-paddle-neoengine.git
@@ -49,24 +55,72 @@ jobs:
               cp -f "$PATCH_DIR"/ResultsTableView.qml Umi-OCR/UmiOCR-data/qt_res/qml/Widgets/ResultLayout/ 2>/dev/null || true
           fi
 
-      - name: "2. Deploy portable standalone Python 3.11"
+      - name: "2. Build GLIBC 2.17+ compatible Host Portable Python 3.10 (.embeddable)"
+        run: |
+          cd build/Umi-OCR/UmiOCR-data
+          
+          # 获取官方 python-build-standalone Python 3.10 (最低支持 GLIBC 2.17)
+          python3 -c "
+          import urllib.request, json
+          url = 'https://api.github.com/repos/astral-sh/python-build-standalone/releases/latest'
+          req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+          with urllib.request.urlopen(req) as resp:
+              data = json.loads(resp.read().decode())
+          for asset in data.get('assets', []):
+              if 'cpython-3.10' in asset['name'] and 'x86_64-unknown-linux-gnu-install_only.tar.gz' in asset['name']:
+                  print(asset['browser_download_url'])
+                  break
+          " > py310_url.txt
+          PY310_URL=$(cat py310_url.txt)
+          echo "Downloading Host Portable Python 3.10: $PY310_URL"
+          curl -sL "$PY310_URL" -o py310.tar.gz
+          tar -xzf py310.tar.gz
+          mv python .embeddable
+          rm py310.tar.gz py310_url.txt
+
+          # 写入兼容各种路径的 activate.sh
+          cat << 'EOF' > .embeddable/activate.sh
+          #!/bin/bash
+          EMBED_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+          export PYTHONHOME="$EMBED_DIR"
+          export PATH="$EMBED_DIR/bin:$PATH"
+          export LD_LIBRARY_PATH="$EMBED_DIR/lib:$LD_LIBRARY_PATH"
+          EOF
+          chmod +x .embeddable/activate.sh
+
+          # 安装 Umi-OCR 宿主所需依赖（PySide2 仅支持至 3.10）
+          ./.embeddable/bin/python3 -m pip install --upgrade pip
+          CC=gcc ./.embeddable/bin/python3 -m pip install "PySide2==5.15.2.1" "PyMuPDF>=1.23" "fonttools>=4.47" "pillow>=10.2" "psutil>=5.9" "pynput" "zxing-cpp" "requests"
+
+      - name: "3. Deploy Portable Python 3.11 for PP-OCRv6 Plugin"
         run: |
           cd build/Umi-OCR/UmiOCR-data/plugins/win_x64_PaddleOCR_Py
           
-          # 获取独立的 Python 3.11 便携环境
-          PY_URL=$(curl -sL https://api.github.com/repos/astral-sh/python-build-standalone/releases/latest | \
-            jq -r '.assets[] | select(.name | test("cpython-3.11.*-x86_64-unknown-linux-gnu-install_only.tar.gz")) | .browser_download_url' | head -n 1)
-          
-          echo "Downloading portable python: $PY_URL"
-          curl -sL "$PY_URL" -o python_portable.tar.gz
+          # 获取独立的 Python 3.11 便携环境 (最低支持 GLIBC 2.17)
+          python3 -c "
+          import urllib.request, json
+          url = 'https://api.github.com/repos/astral-sh/python-build-standalone/releases/latest'
+          req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+          with urllib.request.urlopen(req) as resp:
+              data = json.loads(resp.read().decode())
+          for asset in data.get('assets', []):
+              if 'cpython-3.11' in asset['name'] and 'x86_64-unknown-linux-gnu-install_only.tar.gz' in asset['name']:
+                  print(asset['browser_download_url'])
+                  break
+          " > py311_url.txt
+          PY311_URL=$(cat py311_url.txt)
+          echo "Downloading Plugin Portable Python 3.11: $PY311_URL"
+          curl -sL "$PY311_URL" -o python_portable.tar.gz
           tar -xzf python_portable.tar.gz
           mv python .venv_portable
-          rm python_portable.tar.gz
+          rm python_portable.tar.gz py311_url.txt
 
-          # 生成 Linux 启动脚本 run.sh
+          # 生成 Linux 启动脚本 run.sh（注意 unset 宿主环境变量以防环境污染）
           cat << 'EOF' > run.sh
           #!/usr/bin/env bash
           DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+          unset PYTHONHOME
+          unset PYTHONPATH
           export PYTHONUTF8=1
           export PYTHONIOENCODING=utf-8
           export LD_LIBRARY_PATH="$DIR/.venv_portable/lib:$LD_LIBRARY_PATH"
@@ -74,9 +128,7 @@ jobs:
           EOF
           chmod +x run.sh
 
-      - name: "3. Install PaddleOCR & ONNX Runtime dependencies"
-        run: |
-          cd build/Umi-OCR/UmiOCR-data/plugins/win_x64_PaddleOCR_Py
+          # 安装新引擎推理依赖
           ./.venv_portable/bin/python3 -m pip install --upgrade pip
           ./.venv_portable/bin/python3 -m pip install paddlepaddle==3.2.1 paddleocr==3.7.0 onnxruntime==1.26.0 pymupdf opencv-python-headless pillow psutil openpyxl lxml scipy scikit-learn paddlex
 
@@ -121,9 +173,24 @@ jobs:
           print(">>> 离线模型下载与缓存完成！")
           PY_EOF
 
-      - name: "5. CI Test: verify offline engine pipeline & inference"
+      - name: "5. CI Test: verify both Host & Engine offline environments"
         run: |
-          cd build/Umi-OCR/UmiOCR-data/plugins/win_x64_PaddleOCR_Py
+          cd build/Umi-OCR
+
+          # 1. 验证宿主运行环境 (PySide2 + Qt 核心组件)
+          echo ">>> 验证 Umi-OCR 宿主 Python 3.10 环境..."
+          UmiOCR-data/.embeddable/bin/python3 -c "
+          import PySide2
+          from PySide2.QtCore import QObject
+          import fitz
+          import PIL
+          import psutil
+          print('✅ [Pass] Umi-OCR 宿主 Python 3.10 运行时自检成功！')
+          "
+
+          # 2. 验证新引擎子进程管道 (PaddleOCR PP-OCRv6 + ONNX)
+          echo ">>> 验证 PP-OCRv6 引擎子进程推理通道..."
+          cd UmiOCR-data/plugins/win_x64_PaddleOCR_Py
 
           ./.venv_portable/bin/python3 - << 'TEST_EOF'
           import subprocess
@@ -133,12 +200,10 @@ jobs:
           import sys
           import time
 
-          # 1. 创建测试图片
           img = np.full((120, 400, 3), 255, dtype=np.uint8)
           cv2.putText(img, "TEST OK 123", (30, 70), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 0), 2)
           cv2.imwrite("/tmp/test_ocr.png", img)
 
-          # 2. 启动引擎
           p = subprocess.Popen(
               ["./run.sh", "--engine=onnxruntime", "--ocr_version=PP-OCRv6", "--config_path=models/config_chinese.txt"],
               stdin=subprocess.PIPE,
@@ -148,19 +213,16 @@ jobs:
               bufsize=1
           )
 
-          # 3. 检查初始化
           init_line = p.stdout.readline().strip()
           print("Engine init line:", init_line)
           if "OCR init completed." not in init_line:
               print("Init failed! Stderr:\n", p.stderr.read())
               sys.exit(1)
 
-          # 4. 发送 OCR 识别请求
           req = {"task": "ocr", "image_path": "/tmp/test_ocr.png"}
           p.stdin.write(json.dumps(req) + "\n")
           p.stdin.flush()
 
-          # 5. 检查返回结果
           resp_line = p.stdout.readline().strip()
           print("OCR response:", resp_line)
           resp = json.loads(resp_line)

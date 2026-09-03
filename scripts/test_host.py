@@ -29,6 +29,12 @@ def test_host():
     from py_src.ocr.output.output_pdf_layered import OutputPdfLayered
     from py_src.ocr.output.tools import capture_ocr_trace
     
+    # 动态加载 OCR 插件，确保插件包及其依赖语法无任何异常
+    import importlib
+    plugin = importlib.import_module("plugins.win_x64_PaddleOCR_Py")
+    assert "api_class" in plugin.PluginInfo, "PluginInfo missing api_class"
+    print("✅ [Pass] win_x64_PaddleOCR_Py 动态导入自检成功！")
+    
     print("✅ [Pass] QGuiApplication xcb 插件及全部核心模块导入自检成功！")
 
 if __name__ == "__main__":

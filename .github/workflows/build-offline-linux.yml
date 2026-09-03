@@ -103,26 +103,6 @@ jobs:
           mv python .venv_portable
           rm python_portable.tar.gz py311_url.txt
 
-          # 增强 PPOCR_api.py，在子进程异常退出时自动捕获 engine_stderr.log
-          python3 -c '
-          with open("PPOCR_api.py", "r", encoding="utf-8") as f:
-              code = f.read()
-          old = "if self.ret.poll() is not None:  # 子进程已退出\n                raise Exception(\"OCR init fail.\")"
-          new = """if self.ret.poll() is not None:  # 子进程已退出
-                err_detail = ""
-                try:
-                    if os.path.isfile(_stderr_log):
-                        with open(_stderr_log, "r", encoding="utf-8", errors="ignore") as _f:
-                            err_detail = "\\n".join(_f.read().splitlines()[-20:])
-                except Exception:
-                    pass
-                raise Exception(f"OCR init fail (exitcode={self.ret.poll()}):\\n{err_detail}")"""
-          code = code.replace(old, new)
-          with open("PPOCR_api.py", "w", encoding="utf-8") as f:
-              f.write(code)
-          print("PPOCR_api.py stderr tracing enhanced.")
-          '
-
           # 生成 Linux 启动脚本 run.sh（彻底隔离宿主环境变量）
           cat << 'EOF' > run.sh
           #!/usr/bin/env bash
@@ -263,9 +243,10 @@ jobs:
 
       - name: "6. Add desktop shortcut generator & package"
         run: |
-          # 确保图标文件在 docs/images 和 UmiOCR-data/icon 均存在
-          mkdir -p build/Umi-OCR/UmiOCR-data/icon
+          # 确保根目录有 icon.png，供快捷方式直接引用
           if [ -f "build/Umi-OCR/docs/images/icon-256.png" ]; then
+              cp -f "build/Umi-OCR/docs/images/icon-256.png" "build/Umi-OCR/icon.png"
+              mkdir -p build/Umi-OCR/UmiOCR-data/icon
               cp -f "build/Umi-OCR/docs/images/icon-256.png" "build/Umi-OCR/UmiOCR-data/icon/icon-256.png"
           fi
 
@@ -281,29 +262,23 @@ jobs:
 
           chmod +x "${APP_DIR}/umi-ocr.sh"
 
-          # 确保图标文件存在
-          mkdir -p "${APP_DIR}/UmiOCR-data/icon"
-          if [ -f "${APP_DIR}/docs/images/icon-256.png" ] && [ ! -f "${APP_DIR}/UmiOCR-data/icon/icon-256.png" ]; then
-              cp -f "${APP_DIR}/docs/images/icon-256.png" "${APP_DIR}/UmiOCR-data/icon/icon-256.png"
+          # 保证根目录 icon.png 存在
+          if [ ! -f "${APP_DIR}/icon.png" ] && [ -f "${APP_DIR}/docs/images/icon-256.png" ]; then
+              cp -f "${APP_DIR}/docs/images/icon-256.png" "${APP_DIR}/icon.png"
           fi
 
-          CONTENT="[Desktop Entry]
-          Type=Application
-          Name=Umi-OCR
-          Comment=Umi-OCR
-          Exec=\"${APP_DIR}/umi-ocr.sh\"
-          Path=${APP_DIR}
-          Icon=${APP_DIR}/docs/images/icon-256.png
-          Terminal=false
-          Categories=Office;Utility;
-          "
+          # 安装图标到系统用户图标缓存
+          mkdir -p "${HOME}/.local/share/icons/hicolor/256x256/apps"
+          if [ -f "${APP_DIR}/icon.png" ]; then
+              cp -f "${APP_DIR}/icon.png" "${HOME}/.local/share/icons/hicolor/256x256/apps/umi-ocr.png"
+          fi
 
-          echo "$CONTENT" > "$DESKTOP_FILE"
+          printf "[Desktop Entry]\nType=Application\nName=Umi-OCR\nComment=Umi-OCR\nExec=\"%s/umi-ocr.sh\"\nPath=%s\nIcon=%s/icon.png\nTerminal=false\nCategories=Office;Utility;\n" "${APP_DIR}" "${APP_DIR}" "${APP_DIR}" > "$DESKTOP_FILE"
+
           chmod +x "$DESKTOP_FILE"
 
           mkdir -p "${HOME}/.local/share/applications"
-          echo "$CONTENT" > "$MENU_FILE"
-          chmod +x "$MENU_FILE"
+          cp -f "$DESKTOP_FILE" "$MENU_FILE"
 
           echo "✅ 统信 UOS / Linux 桌面与应用菜单快捷方式创建成功！"
           EOF

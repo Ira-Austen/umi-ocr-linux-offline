@@ -149,15 +149,6 @@ jobs:
           print("下载 PP-OCRv6 small...")
           paddleocr.PaddleOCR(lang="ch", ocr_version="PP-OCRv6", text_detection_model_name="PP-OCRv6_small_det", text_recognition_model_name="PP-OCRv6_small_rec", **kw)
 
-          # 3. 常见多语言模型 (容错下载)
-          multi_langs = [("korean", "PP-OCRv5"), ("japan", "PP-OCRv4"), ("cyrillic", "PP-OCRv4")]
-          for lang_name, ver in multi_langs:
-              try:
-                  print(f"下载 {lang_name} ({ver})...")
-                  paddleocr.PaddleOCR(lang=lang_name, ocr_version=ver, **kw)
-              except Exception as e:
-                  print(f"提示: 跳过 {lang_name} ({ver}): {e}")
-
           print(">>> 离线模型下载与缓存完成！")
           PY_EOF
 

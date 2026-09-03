@@ -44,7 +44,7 @@ jobs:
           # 将插件植入 Umi-OCR 插件目录
           cp -r umi-paddle-neoengine/win_x64_PaddleOCR_Py Umi-OCR/UmiOCR-data/plugins/
 
-          # 覆盖宿主增强补丁 (表格/多任务支持)
+          # 仅覆盖宿主 py_src 与 qt_res 模块补丁（绝不覆盖插件目录，保持插件为最新版 v1.4.2）
           PATCH_DIR=umi-paddle-neoengine/patches/umi-host
           if [ -d "$PATCH_DIR" ]; then
               python3 "$GITHUB_WORKSPACE/scripts/apply_host_patches.py" "$PATCH_DIR" "Umi-OCR/UmiOCR-data"
@@ -103,15 +103,48 @@ jobs:
           mv python .venv_portable
           rm python_portable.tar.gz py311_url.txt
 
-          # 生成 Linux 启动脚本 run.sh（注意 unset 宿主环境变量以防环境污染）
+          # 增强 PPOCR_api.py，在子进程异常退出时自动捕获 engine_stderr.log
+          python3 -c '
+          with open("PPOCR_api.py", "r", encoding="utf-8") as f:
+              code = f.read()
+          old = "if self.ret.poll() is not None:  # 子进程已退出\n                raise Exception(\"OCR init fail.\")"
+          new = """if self.ret.poll() is not None:  # 子进程已退出
+                err_detail = ""
+                try:
+                    if os.path.isfile(_stderr_log):
+                        with open(_stderr_log, "r", encoding="utf-8", errors="ignore") as _f:
+                            err_detail = "\\n".join(_f.read().splitlines()[-20:])
+                except Exception:
+                    pass
+                raise Exception(f"OCR init fail (exitcode={self.ret.poll()}):\\n{err_detail}")"""
+          code = code.replace(old, new)
+          with open("PPOCR_api.py", "w", encoding="utf-8") as f:
+              f.write(code)
+          print("PPOCR_api.py stderr tracing enhanced.")
+          '
+
+          # 生成 Linux 启动脚本 run.sh（彻底隔离宿主环境变量）
           cat << 'EOF' > run.sh
           #!/usr/bin/env bash
           DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
           unset PYTHONHOME
           unset PYTHONPATH
+          unset QT_QPA_PLATFORM_PLUGIN_PATH
+          unset QT_PLUGIN_PATH
+
+          # 过滤掉宿主环境可能泄露的 .embeddable 和 PySide2 路径，彻底防止 Python 3.10 / 3.11 动态库混淆
+          CLEAN_LD=""
+          IFS=':' read -ra ADDR <<< "$LD_LIBRARY_PATH"
+          for i in "${ADDR[@]}"; do
+              if [[ "$i" != *".embeddable"* ]] && [[ "$i" != *"PySide2"* ]]; then
+                  CLEAN_LD="${CLEAN_LD:+$CLEAN_LD:}$i"
+              fi
+          done
+
           export PYTHONUTF8=1
           export PYTHONIOENCODING=utf-8
-          export LD_LIBRARY_PATH="$DIR/.venv_portable/lib:$LD_LIBRARY_PATH"
+          export PADDLE_PDX_CACHE_HOME="$DIR/paddlex"
+          export LD_LIBRARY_PATH="$DIR/.venv_portable/lib${CLEAN_LD:+:$CLEAN_LD}"
           exec "$DIR/.venv_portable/bin/python3" "$DIR/engine.py" "$@"
           EOF
           chmod +x run.sh
@@ -164,8 +197,8 @@ jobs:
             xvfb-run -a env QT_DEBUG_PLUGINS=1 python3 "$GITHUB_WORKSPACE/scripts/test_host.py"
           )
 
-          # 2. 验证新引擎子进程管道 (PaddleOCR PP-OCRv6 + ONNX)
-          echo ">>> 验证 PP-OCRv6 引擎子进程推理通道..."
+          # 2. 验证新引擎子进程管道 (PaddleOCR PP-OCRv6 + ONNX 采用完整 GUI 参数模拟)
+          echo ">>> 验证 PP-OCRv6 引擎子进程完整 GUI 参数推理通道..."
           cd UmiOCR-data/plugins/win_x64_PaddleOCR_Py
           unset PYTHONHOME
           unset PYTHONPATH
@@ -182,8 +215,23 @@ jobs:
           cv2.putText(img, "TEST OK 123", (30, 70), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 0), 2)
           cv2.imwrite("/tmp/test_ocr.png", img)
 
+          full_args = [
+              "./run.sh",
+              "--engine=onnxruntime",
+              "--ocr_version=PP-OCRv6",
+              "--cpu_threads=4",
+              "--table_structure=False",
+              "--config_path=models/config_chinese.txt",
+              "--limit_side_len=1920",
+              "--enable_mkldnn=True",
+              "--fallback_chain=PP-OCRv6,PP-OCRv5,PP-OCRv4",
+              "--use_doc_orientation=True",
+              "--use_doc_unwarping=True",
+              "--use_textline_orientation=True"
+          ]
+
           p = subprocess.Popen(
-              ["./run.sh", "--engine=onnxruntime", "--ocr_version=PP-OCRv6", "--config_path=models/config_chinese.txt"],
+              full_args,
               stdin=subprocess.PIPE,
               stdout=subprocess.PIPE,
               stderr=subprocess.PIPE,
@@ -205,7 +253,7 @@ jobs:
           print("OCR response:", resp_line)
           resp = json.loads(resp_line)
           if resp.get("code") == 100:
-              print("✅ [Pass] CI 离线识别测试通过！")
+              print("✅ [Pass] CI 完整参数离线识别测试通过！")
           else:
               print(f"❌ [Fail] 识别返回异常码: {resp.get('code')}")
               sys.exit(1)
@@ -215,6 +263,12 @@ jobs:
 
       - name: "6. Add desktop shortcut generator & package"
         run: |
+          # 确保图标文件在 docs/images 和 UmiOCR-data/icon 均存在
+          mkdir -p build/Umi-OCR/UmiOCR-data/icon
+          if [ -f "build/Umi-OCR/docs/images/icon-256.png" ]; then
+              cp -f "build/Umi-OCR/docs/images/icon-256.png" "build/Umi-OCR/UmiOCR-data/icon/icon-256.png"
+          fi
+
           # 写入统信 UOS / Linux 桌面图标一键生成脚本
           cat << 'EOF' > build/Umi-OCR/create-desktop-shortcut.sh
           #!/usr/bin/env bash
@@ -227,13 +281,19 @@ jobs:
 
           chmod +x "${APP_DIR}/umi-ocr.sh"
 
+          # 确保图标文件存在
+          mkdir -p "${APP_DIR}/UmiOCR-data/icon"
+          if [ -f "${APP_DIR}/docs/images/icon-256.png" ] && [ ! -f "${APP_DIR}/UmiOCR-data/icon/icon-256.png" ]; then
+              cp -f "${APP_DIR}/docs/images/icon-256.png" "${APP_DIR}/UmiOCR-data/icon/icon-256.png"
+          fi
+
           CONTENT="[Desktop Entry]
           Type=Application
           Name=Umi-OCR
           Comment=Umi-OCR
           Exec=\"${APP_DIR}/umi-ocr.sh\"
           Path=${APP_DIR}
-          Icon=${APP_DIR}/UmiOCR-data/icon/icon-256.png
+          Icon=${APP_DIR}/docs/images/icon-256.png
           Terminal=false
           Categories=Office;Utility;
           "

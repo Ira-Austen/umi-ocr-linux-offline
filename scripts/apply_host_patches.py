@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 精准应用 umi-paddle-neoengine 的宿主增强补丁到 Umi-OCR 目录
+注意：仅覆盖宿主 py_src 与 qt_res 模块，切勿覆盖 plugins/win_x64_PaddleOCR_Py/（插件源码本身已是最新版）
 """
 
 import os
@@ -31,13 +32,6 @@ PATCH_MAP = {
     "BatchDOCConfigs.qml": "qt_res/qml/TabPages/BatchDOC/BatchDOCConfigs.qml",
     "BatchOCRConfigs.qml": "qt_res/qml/TabPages/BatchOCR/BatchOCRConfigs.qml",
     "ResultsTableView.qml": "qt_res/qml/Widgets/ResultLayout/ResultsTableView.qml",
-    # 插件自身同步更新
-    "PPOCR_umi.py": "plugins/win_x64_PaddleOCR_Py/PPOCR_umi.py",
-    "PPOCR_config.py": "plugins/win_x64_PaddleOCR_Py/PPOCR_config.py",
-    "engine.py": "plugins/win_x64_PaddleOCR_Py/engine.py",
-    "model_sources.py": "plugins/win_x64_PaddleOCR_Py/model_sources.py",
-    "table_structure.py": "plugins/win_x64_PaddleOCR_Py/table_structure.py",
-    "punctuation_recovery.py": "plugins/win_x64_PaddleOCR_Py/punctuation_recovery.py",
 }
 
 def apply_patches(patch_dir, umi_data_dir):
@@ -58,7 +52,7 @@ def apply_patches(patch_dir, umi_data_dir):
         applied_count += 1
         print(f"  -> 已覆盖: {src_name} => {rel_dst}")
 
-    print(f"[apply_host_patches] 成功覆盖 {applied_count}/{len(PATCH_MAP)} 个补丁文件。")
+    print(f"[apply_host_patches] 成功覆盖 {applied_count}/{len(PATCH_MAP)} 个宿主补丁文件。")
 
 if __name__ == "__main__":
     if len(sys.argv) < 3:

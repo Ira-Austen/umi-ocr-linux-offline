@@ -12,7 +12,6 @@ import urllib.request
 import subprocess
 
 # 严格使用与统信 UOS / Debian 10 (GLIBC 2.28) 匹配的底层 X11 图形库 (GLIBC <= 2.17)
-# 避免直接复制 Ubuntu 22.04 高版本 glibc (2.33+) 的 libxkbcommon/libxcb 导致 dlopen 失败
 DEBIAN10_XCB_PKGS = [
     "http://archive.debian.org/debian/pool/main/x/xcb-util-wm/libxcb-icccm4_0.4.1-1.1_amd64.deb",
     "http://archive.debian.org/debian/pool/main/x/xcb-util-image/libxcb-image0_0.4.0-1+b2_amd64.deb",
@@ -37,6 +36,7 @@ def patch_all(umi_dir):
     umi_dir = os.path.abspath(umi_dir)
     data_dir = os.path.join(umi_dir, "UmiOCR-data")
     embed_dir = os.path.join(data_dir, ".embeddable")
+    plugin_dir = os.path.join(data_dir, "plugins/win_x64_PaddleOCR_Py")
     
     print(f"[patch_runtime] 正在处理: {umi_dir}")
 
@@ -131,12 +131,10 @@ Qml2Imports = qml
             req = urllib.request.Request(deb_url, headers={"User-Agent": "Mozilla/5.0"})
             with urllib.request.urlopen(req) as resp, open(deb_file, "wb") as out_f:
                 shutil.copyfileobj(resp, out_f)
-            # 使用 dpkg-deb 解包
             subprocess.run(["dpkg-deb", "-x", deb_file, temp_extract], check=True)
         except Exception as e:
             print(f"    [WARN] 下载或解包 {deb_name} 失败: {e}")
 
-    # 将解压出来的 .so 库复制到目标库目录
     src_lib_dir = os.path.join(temp_extract, "usr/lib/x86_64-linux-gnu")
     if os.path.exists(src_lib_dir):
         for entry in os.listdir(src_lib_dir):
@@ -154,7 +152,6 @@ Qml2Imports = qml
                     except Exception:
                         pass
 
-    # 确保 libxcb-util.so.0 与 libxcb-util.so.1 软链接相互完备
     for tdir in target_dirs:
         p0 = os.path.join(tdir, "libxcb-util.so.0")
         p1 = os.path.join(tdir, "libxcb-util.so.1")
@@ -169,11 +166,70 @@ Qml2Imports = qml
             except Exception:
                 pass
 
-    # 清理临时解包目录
     shutil.rmtree(temp_extract, ignore_errors=True)
     print(f" -> 已成功注入 {bundled_count} 个 Debian 10 原生兼容 XCB/XKB 核心图形运行库")
 
-    # 5. 增强 umi-ocr.sh
+    # 5. 写入默认 install_status.json
+    status_file = os.path.join(plugin_dir, "install_status.json")
+    status_content = """{
+  "schema_version": 1,
+  "envs": {
+    "cpu": {
+      "status": "complete",
+      "backend": "onnxruntime",
+      "python_version": "3.11",
+      "providers": [
+        "CPUExecutionProvider"
+      ],
+      "models": "ready",
+      "error": "",
+      "imports": {
+        "paddle": true,
+        "paddleocr": true,
+        "onnxruntime": true
+      }
+    }
+  },
+  "optional": {}
+}
+"""
+    try:
+        with open(status_file, "w", encoding="utf-8") as f:
+            f.write(status_content)
+        print(" -> install_status.json 状态已记录")
+    except Exception as e:
+        print(f" [WARN] 写入 install_status.json 失败: {e}")
+
+    # 6. 增强 PPOCR_umi.py 错误日志回溯
+    ppocr_umi_path = os.path.join(plugin_dir, "PPOCR_umi.py")
+    if os.path.exists(ppocr_umi_path):
+        try:
+            with open(ppocr_umi_path, "r", encoding="utf-8") as f:
+                p_code = f.read()
+            old_str = "detail = build_init_fail_message(tempConfigs, e)"
+            if old_str in p_code and "engine_stderr.log" not in p_code:
+                inject_log = (
+                    "detail = build_init_fail_message(tempConfigs, e)\n"
+                    "            log_detail = ''\n"
+                    "            log_path = os.path.join(os.path.dirname(os.path.abspath(ExePath)), 'engine_stderr.log')\n"
+                    "            if os.path.isfile(log_path):\n"
+                    "                try:\n"
+                    "                    with open(log_path, 'r', encoding='utf-8', errors='ignore') as _f:\n"
+                    "                        _lines = [l.strip() for l in _f.readlines() if l.strip()]\n"
+                    "                        log_detail = chr(10).join(_lines[-15:])\n"
+                    "                except Exception:\n"
+                    "                    pass\n"
+                    "            if log_detail:\n"
+                    "                detail = detail + chr(10) + '--- 引擎终端日志 (engine_stderr.log) ---' + chr(10) + log_detail"
+                )
+                p_code = p_code.replace(old_str, inject_log)
+                with open(ppocr_umi_path, "w", encoding="utf-8") as f:
+                    f.write(p_code)
+                print(" -> PPOCR_umi.py 错误回溯增强已注入")
+        except Exception as e:
+            print(f" [WARN] 增强 PPOCR_umi.py 失败: {e}")
+
+    # 7. 增强 umi-ocr.sh
     umi_sh = os.path.join(umi_dir, "umi-ocr.sh")
     umi_sh_content = """#!/bin/bash
 cd $(dirname ${BASH_SOURCE[0]})

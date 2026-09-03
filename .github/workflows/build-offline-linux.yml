@@ -131,7 +131,28 @@ jobs:
 
           # 安装新引擎推理依赖
           ./.venv_portable/bin/python3 -m pip install --upgrade pip
-          ./.venv_portable/bin/python3 -m pip install paddlepaddle==3.2.1 paddleocr==3.7.0 onnxruntime==1.26.0 pymupdf opencv-python-headless pillow psutil openpyxl lxml scipy scikit-learn paddlex
+          # 核心关键：锁定 cryptography==43.0.3（其 Rust 绑定最低兼容 GLIBC 2.17；44+ 强制要求 GLIBC 2.30 会在统信 UOS 上崩溃）
+          ./.venv_portable/bin/python3 -m pip install "cryptography==43.0.3" paddlepaddle==3.2.1 paddleocr==3.7.0 onnxruntime==1.26.0 pymupdf opencv-python-headless pillow psutil openpyxl lxml scipy scikit-learn paddlex
+
+          # 自动对 .venv_portable 中所有动态库进行 GLIBC <= 2.28 硬约束审计
+          ./.venv_portable/bin/python3 - << 'GLIBC_CHECK_EOF'
+          import os, subprocess, sys
+          max_allowed = (2, 28)
+          bad = []
+          for root, dirs, files in os.walk(".venv_portable"):
+              for f in files:
+                  if f.endswith(".so") or ".so." in f:
+                      p = os.path.join(root, f)
+                      out = subprocess.getoutput(f"objdump -p '{p}' | grep -o 'GLIBC_[0-9]\\.[0-9]*' | sort -V | tail -n 1")
+                      if out.startswith("GLIBC_"):
+                          ver = tuple(map(int, out.replace("GLIBC_", "").split(".")))
+                          if ver > max_allowed:
+                              bad.append((f, out))
+          if bad:
+              print("❌ 发现依赖高于 GLIBC 2.28 的库:", bad)
+              sys.exit(1)
+          print("✅ 依赖库全部通过校验：完全兼容 GLIBC <= 2.28 (统信 UOS / Debian 10)！")
+          GLIBC_CHECK_EOF
 
       - name: "4. Pre-download all offline models (PP-OCRv6 + Tools)"
         run: |

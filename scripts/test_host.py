@@ -9,8 +9,11 @@ import sys
 import site
 
 def test_host():
-    # 确保在 UmiOCR-data 目录下
-    site.addsitedir("./py_src/imports")
+    # 确保在 UmiOCR-data 目录下，并将当前工作目录与自定义导入路径加入 sys.path
+    cwd = os.path.abspath(os.getcwd())
+    if cwd not in sys.path:
+        sys.path.insert(0, cwd)
+    site.addsitedir(os.path.join(cwd, "py_src/imports"))
     
     from PySide2.QtCore import QCoreApplication
     from PySide2.QtGui import QGuiApplication

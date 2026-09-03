@@ -47,14 +47,7 @@ jobs:
           # 覆盖宿主增强补丁 (表格/多任务支持)
           PATCH_DIR=umi-paddle-neoengine/patches/umi-host
           if [ -d "$PATCH_DIR" ]; then
-              cp -f "$PATCH_DIR"/mission*.py Umi-OCR/UmiOCR-data/py_src/mission/ 2>/dev/null || true
-              cp -f "$PATCH_DIR"/Batch*.py Umi-OCR/UmiOCR-data/py_src/tag_pages/ 2>/dev/null || true
-              cp -f "$PATCH_DIR"/line_preprocessing.py Umi-OCR/UmiOCR-data/py_src/ocr/tbpu/parser_tools/ 2>/dev/null || true
-              cp -f "$PATCH_DIR"/output_*.py Umi-OCR/UmiOCR-data/py_src/ocr/output/ 2>/dev/null || true
-              cp -f "$PATCH_DIR"/parser_table_grid.py Umi-OCR/UmiOCR-data/py_src/ocr/tbpu/ 2>/dev/null || true
-              cp -f "$PATCH_DIR"/table_grid.py Umi-OCR/UmiOCR-data/py_src/ocr/tbpu/parser_tools/ 2>/dev/null || true
-              cp -f "$PATCH_DIR"/*.qml Umi-OCR/UmiOCR-data/qt_res/qml/Configs/ 2>/dev/null || true
-              cp -f "$PATCH_DIR"/ResultsTableView.qml Umi-OCR/UmiOCR-data/qt_res/qml/Widgets/ResultLayout/ 2>/dev/null || true
+              python3 "$GITHUB_WORKSPACE/scripts/apply_host_patches.py" "$PATCH_DIR" "Umi-OCR/UmiOCR-data"
           fi
 
       - name: "2. Build GLIBC 2.17+ compatible Host Portable Python 3.10 (.embeddable)"
@@ -172,11 +165,25 @@ jobs:
         run: |
           cd build/Umi-OCR
 
-          # 1. 验证宿主运行环境 (在 xvfb-run 下测试 QGuiApplication 初始化)
-          echo ">>> 验证 Umi-OCR 宿主 Python 3.10 环境及 Qt xcb 插件加载..."
+          # 1. 验证宿主运行环境 (在 xvfb-run 下测试 QGuiApplication 初始化及全部核心业务模块导入)
+          echo ">>> 验证 Umi-OCR 宿主 Python 3.10 环境及业务模块导入..."
           (
-            source UmiOCR-data/.embeddable/activate.sh
-            xvfb-run -a env QT_DEBUG_PLUGINS=1 python3 -c "import os, sys; from PySide2.QtCore import QCoreApplication; from PySide2.QtGui import QGuiApplication; print('Qt library paths:', QCoreApplication.libraryPaths()); app = QGuiApplication(sys.argv); print('✅ [Pass] QGuiApplication xcb 插件初始化成功！')"
+            cd UmiOCR-data
+            source .embeddable/activate.sh
+            xvfb-run -a env QT_DEBUG_PLUGINS=1 python3 -c "
+            import os, sys, site
+            site.addsitedir('./py_src/imports')
+            from PySide2.QtCore import QCoreApplication
+            from PySide2.QtGui import QGuiApplication
+            print('Qt library paths:', QCoreApplication.libraryPaths())
+            app = QGuiApplication(sys.argv)
+            from py_src.tag_pages.tag_pages_connector import TagPageConnector
+            from py_src.tag_pages.BatchOCR import BatchOCR
+            from py_src.mission.mission_ocr import MissionOCR
+            from py_src.ocr.output.output_pdf_layered import OutputPdfLayered
+            from py_src.ocr.output.tools import capture_ocr_trace
+            print('✅ [Pass] QGuiApplication xcb 插件及全部核心模块加载成功！')
+            "
           )
 
           # 2. 验证新引擎子进程管道 (PaddleOCR PP-OCRv6 + ONNX)

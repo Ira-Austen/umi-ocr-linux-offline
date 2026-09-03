@@ -170,20 +170,7 @@ jobs:
           (
             cd UmiOCR-data
             source .embeddable/activate.sh
-            xvfb-run -a env QT_DEBUG_PLUGINS=1 python3 -c "
-            import os, sys, site
-            site.addsitedir('./py_src/imports')
-            from PySide2.QtCore import QCoreApplication
-            from PySide2.QtGui import QGuiApplication
-            print('Qt library paths:', QCoreApplication.libraryPaths())
-            app = QGuiApplication(sys.argv)
-            from py_src.tag_pages.tag_pages_connector import TagPageConnector
-            from py_src.tag_pages.BatchOCR import BatchOCR
-            from py_src.mission.mission_ocr import MissionOCR
-            from py_src.ocr.output.output_pdf_layered import OutputPdfLayered
-            from py_src.ocr.output.tools import capture_ocr_trace
-            print('✅ [Pass] QGuiApplication xcb 插件及全部核心模块加载成功！')
-            "
+            xvfb-run -a env QT_DEBUG_PLUGINS=1 python3 "$GITHUB_WORKSPACE/scripts/test_host.py"
           )
 
           # 2. 验证新引擎子进程管道 (PaddleOCR PP-OCRv6 + ONNX)
